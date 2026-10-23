@@ -86,6 +86,36 @@ pub struct Limits {
 impl Limits {
     /// `pids.max` when none is given.
     pub const DEFAULT_PIDS_MAX: u32 = 4096;
+
+    /// Checks values are in sane ranges. Returns the reason on failure.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.cores.is_some_and(|c| !(1..=1024).contains(&c)) {
+            return Err("cores must be between 1 and 1024");
+        }
+        // 16 MiB is about the least a container boots with; the upper bound avoids overflow.
+        if self
+            .memory_mb
+            .is_some_and(|m| !(16..=16 * 1024 * 1024).contains(&m))
+        {
+            return Err("memory_mb must be between 16 and 16777216");
+        }
+        if self.swap_mb.is_some_and(|m| m > 16 * 1024 * 1024) {
+            return Err("swap_mb must be at most 16777216");
+        }
+        if self
+            .disk_gb
+            .is_some_and(|d| !(1..=1024 * 1024).contains(&d))
+        {
+            return Err("disk_gb must be between 1 and 1048576");
+        }
+        if self
+            .pids_max
+            .is_some_and(|p| !(16..=4_194_304).contains(&p))
+        {
+            return Err("pids_max must be between 16 and 4194304");
+        }
+        Ok(())
+    }
 }
 
 /// How a container gets its address.
@@ -148,4 +178,50 @@ pub struct ExecOutput {
     pub stdout: Vec<u8>,
     /// Captured stderr.
     pub stderr: Vec<u8>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn limits_validation() {
+        assert!(Limits::default().validate().is_ok());
+        let ok = Limits {
+            cores: Some(4),
+            memory_mb: Some(8192),
+            swap_mb: Some(0),
+            disk_gb: Some(50),
+            pids_max: None,
+        };
+        assert!(ok.validate().is_ok());
+        for bad in [
+            Limits {
+                cores: Some(0),
+                ..ok
+            },
+            Limits {
+                memory_mb: Some(1),
+                ..ok
+            },
+            Limits {
+                memory_mb: Some(u64::MAX),
+                ..ok
+            },
+            Limits {
+                swap_mb: Some(u64::MAX),
+                ..ok
+            },
+            Limits {
+                disk_gb: Some(0),
+                ..ok
+            },
+            Limits {
+                pids_max: Some(1),
+                ..ok
+            },
+        ] {
+            assert!(bad.validate().is_err(), "{bad:?}");
+        }
+    }
 }

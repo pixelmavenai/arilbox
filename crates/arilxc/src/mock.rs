@@ -1,6 +1,6 @@
 //! In-memory [`ContainerBackend`] for API and job tests.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::net::Ipv4Addr;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -31,6 +31,7 @@ struct State {
 #[derive(Debug, Default)]
 pub struct MockBackend {
     state: Mutex<State>,
+    failures: Mutex<HashSet<&'static str>>,
 }
 
 impl MockBackend {
@@ -42,6 +43,29 @@ impl MockBackend {
     /// Current limits of a container (the trait has no getter; handy in tests).
     pub fn limits(&self, name: &ContainerName) -> Result<Limits> {
         Ok(self.lock().get(name)?.limits)
+    }
+
+    /// Makes every later call of operation `op` (`"create"`, `"start"`, `"stop"`, `"kill"`,
+    /// `"destroy"`, …) fail with [`Error::Backend`]. `"network"` makes `start` succeed without
+    /// assigning an address.
+    pub fn fail_on(&self, op: &'static str) {
+        self.failures
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(op);
+    }
+
+    fn check(&self, op: &'static str) -> Result<()> {
+        let failing = self
+            .failures
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(op);
+        if failing {
+            Err(Error::Backend(format!("injected failure: {op}")))
+        } else {
+            Ok(())
+        }
     }
 
     fn lock(&self) -> Guard<'_> {
@@ -106,6 +130,7 @@ impl ContainerBackend for MockBackend {
     }
 
     async fn create(&self, spec: &CreateSpec) -> Result<()> {
+        self.check("create")?;
         let mut s = self.lock();
         if s.0.containers.contains_key(&spec.name) {
             return Err(Error::Exists(spec.name.clone()));
@@ -135,6 +160,8 @@ impl ContainerBackend for MockBackend {
     }
 
     async fn start(&self, name: &ContainerName) -> Result<()> {
+        self.check("start")?;
+        let no_network = self.check("network").is_err();
         let mut s = self.lock();
         s.require_state(name, ContainerState::Stopped)?;
         s.0.next_pid += 1;
@@ -143,24 +170,27 @@ impl ContainerBackend for MockBackend {
         let info = &mut s.get_mut(name)?.info;
         info.state = ContainerState::Running;
         info.pid = Some(pid);
-        info.ipv4 = vec![ip];
+        info.ipv4 = if no_network { Vec::new() } else { vec![ip] };
         info.memory_bytes = 64 * 1024 * 1024;
         Ok(())
     }
 
     async fn stop(&self, name: &ContainerName, _timeout: Duration) -> Result<()> {
+        self.check("stop")?;
         let mut s = self.lock();
         s.require_state(name, ContainerState::Running)?;
         s.set_stopped(name)
     }
 
     async fn kill(&self, name: &ContainerName) -> Result<()> {
+        self.check("kill")?;
         let mut s = self.lock();
         s.require_state(name, ContainerState::Running)?;
         s.set_stopped(name)
     }
 
     async fn destroy(&self, name: &ContainerName) -> Result<()> {
+        self.check("destroy")?;
         let mut s = self.lock();
         s.require_state(name, ContainerState::Stopped)?;
         s.0.containers.remove(name);
@@ -322,6 +352,17 @@ mod tests {
         b.destroy(&web).await.unwrap();
         assert!(matches!(b.info(&web).await, Err(Error::NotFound(_))));
         assert!(b.list().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn injected_failures() {
+        let b = MockBackend::new();
+        b.fail_on("network");
+        b.create(&spec("a")).await.unwrap();
+        b.start(&name("a")).await.unwrap();
+        assert!(b.info(&name("a")).await.unwrap().ipv4.is_empty());
+        b.fail_on("create");
+        assert!(matches!(b.create(&spec("b")).await, Err(Error::Backend(_))));
     }
 
     #[tokio::test]

@@ -5,12 +5,17 @@
 //! (in-memory, for API and job tests).
 
 mod backend;
+pub mod config;
 mod error;
+mod fsutil;
+pub mod lxc_cli;
 mod mock;
+pub mod template;
 mod types;
 
 pub use backend::ContainerBackend;
 pub use error::{Error, Result};
+pub use lxc_cli::LxcCli;
 pub use mock::MockBackend;
 pub use types::{
     ContainerInfo, ContainerState, CreateSpec, ExecOutput, Limits, NetworkMode, NetworkSpec,

@@ -25,6 +25,9 @@ pub struct Config {
     /// Filesystem locations.
     #[serde(default)]
     pub paths: PathsConfig,
+    /// Container backend.
+    #[serde(default)]
+    pub containers: ContainersConfig,
     /// Managed bridge network.
     #[serde(default)]
     pub network: NetworkConfig,
@@ -79,6 +82,36 @@ impl Default for PathsConfig {
         Self {
             data_dir: PathBuf::from("/var/lib/arilbox"),
             catalog_dir: PathBuf::from("/usr/share/arilbox/catalog"),
+        }
+    }
+}
+
+/// Which [`ContainersConfig::backend`] implementation the daemon uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BackendKind {
+    /// Real LXC through the `lxc-*` tools.
+    #[default]
+    Lxc,
+    /// In-memory mock: no host changes. Only allowed with `server.dev_mode = true`.
+    Mock,
+}
+
+/// `[containers]` section.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ContainersConfig {
+    /// Backend implementation.
+    pub backend: BackendKind,
+    /// LXC container directory (`lxc-* -P`).
+    pub lxc_path: PathBuf,
+}
+
+impl Default for ContainersConfig {
+    fn default() -> Self {
+        Self {
+            backend: BackendKind::Lxc,
+            lxc_path: PathBuf::from("/var/lib/lxc"),
         }
     }
 }
@@ -252,6 +285,15 @@ impl Config {
             ));
         }
 
+        if self.containers.backend == BackendKind::Mock && !self.server.dev_mode {
+            return Err(Error::Config(
+                "containers.backend = \"mock\" is only allowed with server.dev_mode = true".into(),
+            ));
+        }
+        if !self.containers.lxc_path.is_absolute() {
+            return Err(Error::Config("containers.lxc_path must be absolute".into()));
+        }
+
         let mut names = HashSet::new();
         for pool in &self.storage {
             if !names.insert(pool.name()) {
@@ -342,10 +384,12 @@ mod tests {
     }
 
     #[test]
-    fn dev_config_in_repo_is_valid() {
-        let text = include_str!("../../../packaging/dev-config.toml");
-        let c = Config::from_toml(text).unwrap();
+    fn dev_configs_in_repo_are_valid() {
+        let c = Config::from_toml(include_str!("../../../packaging/dev-config.toml")).unwrap();
         assert!(c.server.dev_mode);
+        assert_eq!(c.containers.backend, BackendKind::Lxc);
+        let c = Config::from_toml(include_str!("../../../packaging/dev-config-mock.toml")).unwrap();
+        assert_eq!(c.containers.backend, BackendKind::Mock);
     }
 
     #[test]
@@ -353,6 +397,18 @@ mod tests {
         let err = Config::from_toml("[server]\ntls = false").unwrap_err();
         assert!(err.to_string().contains("dev_mode"), "{err}");
         assert!(Config::from_toml("[server]\ntls = false\ndev_mode = true").is_ok());
+    }
+
+    #[test]
+    fn mock_backend_only_in_dev_mode() {
+        assert!(Config::from_toml("[containers]\nbackend = \"mock\"").is_err());
+        let c = Config::from_toml("[server]\ndev_mode = true\n[containers]\nbackend = \"mock\"")
+            .unwrap();
+        assert_eq!(c.containers.backend, BackendKind::Mock);
+        assert_eq!(
+            Config::from_toml("").unwrap().containers.backend,
+            BackendKind::Lxc
+        );
     }
 
     #[test]

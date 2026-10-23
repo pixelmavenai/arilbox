@@ -37,6 +37,9 @@ pub enum Error {
         /// Snapshot.
         snap: SnapshotName,
     },
+    /// The request uses something this backend or build does not support yet.
+    #[error("not supported: {0}")]
+    Unsupported(&'static str),
     /// The backend failed. Details are for logs, not API clients.
     #[error("container backend error: {0}")]
     Backend(String),

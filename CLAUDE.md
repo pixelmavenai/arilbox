@@ -44,8 +44,8 @@ arilbox/
 
 ## Current status
 
-- **Milestone:** M2 — Containers (M1 — Skeleton is done; see `SPEC.md` §19 for scope and
-  acceptance criteria).
+- **Milestone:** M3 — Auth + UI (M1 — Skeleton and M2 — Containers are done; see `SPEC.md` §19
+  for scope and acceptance criteria).
 - Work milestone by milestone. Do not start features from a later milestone unless asked.
 - When a milestone's acceptance criteria pass, update this line.
 
@@ -60,15 +60,18 @@ cargo fmt --all -- --check
 # Unit tests (no root, no LXC needed — use the mock backend)
 cargo test --workspace
 
-# Integration tests (Debian 13 host with LXC installed, run as root)
-sudo -E cargo test --workspace --features lxc-integration -- --test-threads=1
+# Integration tests (Debian 13 host with LXC installed, run as root). They create only
+# arilbox-test-* containers, the bridge arilbox-test-0 and the nft table arilbox_test.
+cargo build --workspace --all-targets --features lxc-integration
+sudo -E env "PATH=$PATH" cargo test --workspace --features lxc-integration -- --test-threads=1
 
 # Frontend
 cd web && npm install && npm run dev      # dev server, proxies /api to arilboxd
 cd web && npm run build                   # outputs web/dist, served by arilboxd
 
-# Run the daemon locally (dev config)
-sudo -E cargo run -p arilbox-daemon -- --config packaging/dev-config.toml
+# Run the daemon locally: real LXC (root) or the in-memory mock (no root)
+cargo build -p arilbox-daemon && sudo ./target/debug/arilboxd --config packaging/dev-config.toml
+cargo run -p arilbox-daemon -- --config packaging/dev-config-mock.toml
 ```
 
 ## Development environment
@@ -125,7 +128,11 @@ integration tests on a production server.
 ## Test safety rules
 
 - Integration tests create containers, datasets and snapshots **only** with the prefix
-  `arilbox-test-` (e.g. `arilbox-test-create-01`) and only under `tank/arilbox/test/`.
+  `arilbox-test-` (e.g. `arilbox-test-create-01`) and only under `tank/arilbox/test/` (ZFS) or
+  `/var/lib/arilbox/test/` (dir pool).
+- Network tests use only the bridge `arilbox-test-0` (subnet `10.250.77.0/24`) and the nftables
+  table `arilbox_test` (nft names can't contain `-`). The `arilxc` tests attach containers to
+  LXC's own `lxcbr0` but never change it.
 - Tests must clean up everything they create, including on failure (use a drop guard).
 - Never stop, modify or delete a container, dataset or bridge that does not carry the test
   prefix — the dev machine may also hold the developer's own containers.

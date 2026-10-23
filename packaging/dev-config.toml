@@ -1,5 +1,7 @@
-# Development config for arilboxd. Production defaults are in SPEC.md §16.
-#   cargo run -p arilbox-daemon -- --config packaging/dev-config.toml
+# Development config for arilboxd with real LXC. Production defaults are in SPEC.md §16.
+# Needs root (creates the arilbox0 bridge, an nftables table, dnsmasq, containers):
+#   cargo build -p arilbox-daemon && sudo ./target/debug/arilboxd --config packaging/dev-config.toml
+# Without root, use packaging/dev-config-mock.toml.
 # Runtime files (self-signed cert, data) go under target/dev/, which git ignores.
 
 [server]
@@ -9,6 +11,10 @@ tls_key = "target/dev/tls/key.pem"
 tls = true
 dev_mode = true
 
+[containers]
+backend = "lxc"
+lxc_path = "/var/lib/lxc"
+
 [paths]
 data_dir = "target/dev/data"
 catalog_dir = "catalog"
@@ -17,11 +23,17 @@ catalog_dir = "catalog"
 bridge = "arilbox0"
 subnet = "10.88.0.1/24"
 
+# Directory pool until ZFS is set up on the dev VM (ZFS storage arrives in M4).
+[[storage]]
+name = "local-dir"
+type = "dir"
+path = "/var/lib/arilbox/storage"
+
 [[storage]]
 name = "local-zfs"
 type = "zfs"
 dataset = "tank/arilbox"
 
 [defaults]
-storage = "local-zfs"
+storage = "local-dir"
 template = { distro = "debian", release = "13" }

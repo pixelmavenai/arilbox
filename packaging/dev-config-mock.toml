@@ -1,0 +1,26 @@
+# Development config with the in-memory mock backend: no root, no LXC, no host changes.
+# Useful for UI and API work:
+#   cargo run -p arilbox-daemon -- --config packaging/dev-config-mock.toml
+
+[server]
+bind = "127.0.0.1:8443"
+tls_cert = "target/dev/tls/cert.pem"
+tls_key = "target/dev/tls/key.pem"
+tls = true
+dev_mode = true
+
+[containers]
+backend = "mock"
+
+[paths]
+data_dir = "target/dev/data-mock"
+catalog_dir = "catalog"
+
+[[storage]]
+name = "local-dir"
+type = "dir"
+path = "/var/lib/arilbox/storage"
+
+[defaults]
+storage = "local-dir"
+template = { distro = "debian", release = "13" }

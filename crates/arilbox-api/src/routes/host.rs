@@ -27,7 +27,7 @@ mod tests {
 
     #[tokio::test]
     async fn host_info_shape() {
-        let (status, _, body) = get(app(false), "/api/v1/host").await;
+        let (status, _, body) = get(app(false).await, "/api/v1/host").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
             body,
@@ -45,7 +45,7 @@ mod tests {
 
     #[tokio::test]
     async fn host_info_failure_is_opaque_500() {
-        let (status, _, body) = get(app(true), "/api/v1/host").await;
+        let (status, _, body) = get(app(true).await, "/api/v1/host").await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(body["error"]["code"], "internal_error");
         assert!(
@@ -56,11 +56,11 @@ mod tests {
 
     #[tokio::test]
     async fn capabilities_shape() {
-        let (status, _, body) = get(app(false), "/api/v1/host/capabilities").await;
+        let (status, _, body) = get(app(false).await, "/api/v1/host/capabilities").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
             body,
-            json!({ "zfs": true, "nvidia": false, "kvm": false, "cgroup_v2": true })
+            json!({ "zfs": false, "nvidia": false, "kvm": false, "cgroup_v2": true })
         );
     }
 }

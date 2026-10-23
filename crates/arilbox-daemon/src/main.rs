@@ -9,9 +9,13 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Context;
-use arilbox_api::AppState;
-use arilbox_core::config::Config;
+use arilbox_api::jobs::Jobs;
+use arilbox_api::{AppState, Settings};
+use arilbox_core::config::{BackendKind, Config, StoragePool};
+use arilbox_core::exec::{Program, ProgramPaths, RealExec};
 use arilbox_core::host::{HostProbe, SystemProbe};
+use arilbox_net::{ManagedNetwork, Sys};
+use arilxc::ContainerBackend;
 use tracing_subscriber::EnvFilter;
 
 use crate::args::Args;
@@ -33,6 +37,31 @@ fn main() -> anyhow::Result<()> {
         .build()
         .context("starting tokio runtime")?
         .block_on(run(config))
+}
+
+/// Programs the lxc backend and network setup need; checked at start-up.
+const REQUIRED_PROGRAMS: &[Program] = &[
+    Program::LxcCreate,
+    Program::LxcStart,
+    Program::LxcStop,
+    Program::LxcInfo,
+    Program::LxcAttach,
+    Program::LxcDestroy,
+    Program::Ip,
+    Program::Nft,
+    Program::Dnsmasq,
+];
+
+/// Effective UID 0, read from `/proc/self/status` (no libc needed).
+fn is_root() -> bool {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find_map(|l| l.strip_prefix("Uid:"))
+                .and_then(|ids| ids.split_whitespace().nth(1).map(|e| e == "0"))
+        })
+        .unwrap_or(false)
 }
 
 fn init_tracing(dev_mode: bool) {
@@ -63,12 +92,73 @@ async fn run(config: Config) -> anyhow::Result<()> {
     }
 
     create_private_dir(&config.paths.data_dir)?;
+    for pool in &config.storage {
+        if matches!(pool, StoragePool::Zfs { .. }) && !caps.zfs {
+            tracing::warn!(pool = %pool.name(), "ZFS is not available; this pool cannot be used");
+        }
+    }
 
-    // M1: in-memory backend only. Replaced by `LxcCli` in M2.
-    tracing::warn!("using in-memory mock container backend (M1 skeleton)");
+    let db = arilbox_api::db::open(&config.paths.data_dir.join("arilbox.db"))
+        .await
+        .context("opening database")?;
+
+    // Kept alive until shutdown; dropping it would kill dnsmasq.
+    let mut _dnsmasq = None;
+    let containers: Arc<dyn ContainerBackend> = match config.containers.backend {
+        BackendKind::Mock => {
+            tracing::warn!("using the in-memory mock container backend (dev mode)");
+            Arc::new(arilxc::MockBackend::new())
+        }
+        BackendKind::Lxc => {
+            if !is_root() {
+                anyhow::bail!("arilboxd must run as root with the lxc backend");
+            }
+            let exec = Arc::new(RealExec::new(
+                ProgramPaths::resolve(REQUIRED_PROGRAMS).context("required program missing")?,
+            ));
+            let net = ManagedNetwork {
+                bridge: config.network.bridge.clone(),
+                subnet: config.network.subnet,
+                nft_table: "arilbox",
+                state_dir: config.paths.data_dir.join("net"),
+            };
+            arilbox_net::setup(exec.as_ref(), &Sys::default(), &net)
+                .await
+                .context("setting up the container network")?;
+            _dnsmasq = Some(
+                arilbox_net::supervise_dnsmasq(exec.clone(), &net)
+                    .context("subnet has no room for DHCP addresses")?,
+            );
+            Arc::new(arilxc::LxcCli::new(
+                exec,
+                config.containers.lxc_path.clone(),
+                config.storage.clone(),
+                config.paths.data_dir.join("tmp"),
+            ))
+        }
+    };
+
+    let jobs = Jobs::new(db.clone(), containers.clone());
+    let interrupted = jobs.mark_interrupted().await.context("recovering jobs")?;
+    if interrupted > 0 {
+        tracing::warn!(
+            count = interrupted,
+            "marked jobs from a previous run as failed"
+        );
+    }
+
     let state = AppState {
-        containers: Arc::new(arilxc::MockBackend::new()),
+        containers,
         host: Arc::new(probe),
+        jobs,
+        db,
+        settings: Arc::new(Settings {
+            storage: config.storage.clone(),
+            default_storage: config.defaults.storage.clone(),
+            default_template: config.defaults.template.clone(),
+            managed_bridge: config.network.bridge.clone(),
+            sys: Sys::default(),
+        }),
     };
     let app = arilbox_api::router(state);
 

@@ -15,6 +15,7 @@ path = "src/main.rs"
 anyhow.workspace = true
 arilbox-api.workspace = true
 arilbox-core.workspace = true
+arilbox-net.workspace = true
 arilxc.workspace = true
 axum.workspace = true
 hyper-util.workspace = true

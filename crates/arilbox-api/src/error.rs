@@ -110,6 +110,11 @@ impl From<arilxc::Error> for ApiError {
                 "snapshot_exists",
                 format!("Snapshot '{snap}' of container '{name}' already exists"),
             ),
+            E::Unsupported(what) => Self::new(
+                StatusCode::BAD_REQUEST,
+                "unsupported",
+                format!("Not supported: {what}"),
+            ),
             E::Backend(detail) => {
                 tracing::error!(%detail, "container backend error");
                 Self::internal()

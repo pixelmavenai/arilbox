@@ -1,12 +1,14 @@
 //! Route table for `/api/v1`.
 //!
-//! M1: no authentication yet. Sessions and CSRF arrive in M3 (`SPEC.md` §12); until then the
-//! daemon is for development only. `/health` stays public afterwards.
+//! No authentication until M3 (sessions, `SPEC.md` §12); until then the daemon is for
+//! development only. The CSRF header and the audit log already apply. `/health` stays public.
 
+mod containers;
 mod host;
+mod jobs;
 
 use axum::Router;
-use axum::routing::get;
+use axum::routing::{get, post};
 use serde_json::{Value, json};
 
 use crate::AppState;
@@ -18,6 +20,20 @@ pub(crate) fn v1() -> Router<AppState> {
         .route("/health", get(health))
         .route("/host", get(host::info))
         .route("/host/capabilities", get(host::capabilities))
+        .route(
+            "/containers",
+            get(containers::list).post(containers::create),
+        )
+        .route(
+            "/containers/{name}",
+            get(containers::get).delete(containers::delete),
+        )
+        .route("/containers/{name}/start", post(containers::start))
+        .route("/containers/{name}/stop", post(containers::stop))
+        .route("/containers/{name}/restart", post(containers::restart))
+        .route("/jobs", get(jobs::list))
+        .route("/jobs/{id}", get(jobs::get))
+        .route("/jobs/{id}/events", get(jobs::events))
 }
 
 /// `GET /api/v1/health`: liveness check.
@@ -41,7 +57,10 @@ pub(crate) mod tests {
     use serde_json::Value;
     use tower::ServiceExt;
 
-    use crate::{AppState, REQUEST_ID_HEADER, router};
+    use arilbox_core::config::{StoragePool, TemplateRef};
+    use arilbox_core::{BridgeName, DatasetPath, StorageName};
+
+    use crate::{AppState, REQUEST_ID_HEADER, Settings, router};
 
     /// Fixed host data so tests don't depend on the machine.
     pub(crate) struct FakeProbe {
@@ -69,7 +88,7 @@ pub(crate) mod tests {
 
         fn capabilities(&self) -> Capabilities {
             Capabilities {
-                zfs: true,
+                zfs: false,
                 nvidia: false,
                 kvm: false,
                 cgroup_v2: true,
@@ -77,11 +96,49 @@ pub(crate) mod tests {
         }
     }
 
-    pub(crate) fn app(fail: bool) -> axum::Router {
-        router(AppState {
-            containers: Arc::new(MockBackend::new()),
+    /// Router plus handles on its state, backed by the mock backend and in-memory SQLite.
+    pub(crate) struct TestApp {
+        pub router: axum::Router,
+        pub state: AppState,
+        pub backend: Arc<MockBackend>,
+    }
+
+    pub(crate) async fn test_app(fail: bool) -> TestApp {
+        let backend = Arc::new(MockBackend::new());
+        let db = crate::db::memory().await.unwrap();
+        let mut jobs = crate::jobs::Jobs::new(db.clone(), backend.clone());
+        jobs.network_timeout = std::time::Duration::from_millis(200);
+        let state = AppState {
+            containers: backend.clone(),
             host: Arc::new(FakeProbe { fail }),
-        })
+            jobs,
+            db,
+            settings: Arc::new(Settings {
+                storage: vec![
+                    StoragePool::Dir {
+                        name: StorageName::new("local-dir").unwrap(),
+                        path: "/var/lib/arilbox/storage".into(),
+                    },
+                    StoragePool::Zfs {
+                        name: StorageName::new("local-zfs").unwrap(),
+                        dataset: DatasetPath::new("tank/arilbox").unwrap(),
+                    },
+                ],
+                default_storage: Some(StorageName::new("local-dir").unwrap()),
+                default_template: TemplateRef::default(),
+                managed_bridge: BridgeName::new("arilbox0").unwrap(),
+                sys: arilbox_net::Sys::new("/nonexistent-arilbox-test-sys"),
+            }),
+        };
+        TestApp {
+            router: router(state.clone()),
+            state,
+            backend,
+        }
+    }
+
+    pub(crate) async fn app(fail: bool) -> axum::Router {
+        test_app(fail).await.router
     }
 
     /// Sends a GET and returns status, request-id header and JSON body.
@@ -101,7 +158,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn health_ok() {
-        let (status, _, body) = get(app(false), "/api/v1/health").await;
+        let (status, _, body) = get(app(false).await, "/api/v1/health").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body, serde_json::json!({ "status": "ok" }));
     }
@@ -109,7 +166,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn unknown_route_is_json_404() {
         for uri in ["/api/v1/nope", "/nope", "/api/v2/host"] {
-            let (status, _, body) = get(app(false), uri).await;
+            let (status, _, body) = get(app(false).await, uri).await;
             assert_eq!(status, StatusCode::NOT_FOUND, "{uri}");
             assert_eq!(body["error"]["code"], "not_found", "{uri}");
         }
@@ -117,7 +174,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn every_response_has_a_request_id() {
-        let (_, id, _) = get(app(false), "/api/v1/health").await;
+        let (_, id, _) = get(app(false).await, "/api/v1/health").await;
         let id = id.expect("x-request-id header");
         assert_eq!(id.len(), 36, "uuid: {id}");
     }
@@ -125,6 +182,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn client_request_id_is_propagated() {
         let res = app(false)
+            .await
             .oneshot(
                 Request::get("/api/v1/health")
                     .header(REQUEST_ID_HEADER, "abc-123")

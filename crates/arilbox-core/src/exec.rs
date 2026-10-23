@@ -249,24 +249,46 @@ impl RealExec {
     pub fn new(paths: ProgramPaths) -> Self {
         Self { paths }
     }
-}
 
-#[async_trait::async_trait]
-impl Exec for RealExec {
-    async fn run(&self, spec: CommandSpec) -> Result<Output, ExecError> {
+    /// A command for `spec` with the safety rules applied (clean env, no shell, kill on drop).
+    fn command(&self, spec: &CommandSpec) -> Result<tokio::process::Command, ExecError> {
         let program = spec.program;
         let path = self
             .paths
             .get(program)
             .ok_or(ExecError::NotFound { program })?;
         tracing::debug!(%program, args = ?spec.args, "exec");
-
-        let mut child = tokio::process::Command::new(path)
-            .args(&spec.args)
+        let mut cmd = tokio::process::Command::new(path);
+        cmd.args(&spec.args)
             .env_clear()
             .env("PATH", SAFE_PATH)
             .env("LC_ALL", "C")
             .envs(spec.env.iter().map(|(k, v)| (k, v)))
+            .kill_on_drop(true);
+        Ok(cmd)
+    }
+
+    /// Starts a long-running service (e.g. `dnsmasq` in the foreground) and returns the child
+    /// for the caller to supervise. Same rules as [`Exec::run`] except there is no timeout and
+    /// no stdin; stdout is discarded and stderr goes to the daemon's stderr (the journal). The
+    /// child is killed when the handle is dropped.
+    pub fn spawn_service(&self, spec: &CommandSpec) -> Result<tokio::process::Child, ExecError> {
+        let program = spec.program;
+        self.command(spec)?
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .map_err(|source| ExecError::Spawn { program, source })
+    }
+}
+
+#[async_trait::async_trait]
+impl Exec for RealExec {
+    async fn run(&self, spec: CommandSpec) -> Result<Output, ExecError> {
+        let program = spec.program;
+        let mut child = self
+            .command(&spec)?
             .stdin(if spec.stdin.is_some() {
                 Stdio::piped()
             } else {
@@ -274,7 +296,6 @@ impl Exec for RealExec {
             })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
             .spawn()
             .map_err(|source| ExecError::Spawn { program, source })?;
 
@@ -497,6 +518,16 @@ mod tests {
                 program: Program::Zfs
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn service_runs_until_dropped() {
+        let exec = exec_with("sleep");
+        let mut child = exec
+            .spawn_service(&CommandSpec::new(Program::Ip, ["30"]))
+            .unwrap();
+        assert!(child.try_wait().unwrap().is_none(), "still running");
+        child.kill().await.unwrap();
     }
 
     #[test]
