@@ -15,6 +15,7 @@ backend = "mock"
 [paths]
 data_dir = "target/dev/data-mock"
 catalog_dir = "catalog"
+web_dir = "web/dist"                   # npm run build in web/
 
 [[storage]]
 name = "local-dir"

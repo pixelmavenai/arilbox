@@ -37,7 +37,10 @@ pub async fn serve_tls(
         };
 
         let acceptor = acceptor.clone();
-        let app = app.clone();
+        // The peer address, for login throttling (axum's `ConnectInfo`).
+        let app = app
+            .clone()
+            .layer(axum::Extension(axum::extract::ConnectInfo(peer)));
         tokio::spawn(async move {
             let tls = match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(tcp)).await {
                 Ok(Ok(tls)) => tls,

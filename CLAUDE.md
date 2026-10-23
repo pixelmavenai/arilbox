@@ -44,8 +44,8 @@ arilbox/
 
 ## Current status
 
-- **Milestone:** M3 — Auth + UI (M1 — Skeleton and M2 — Containers are done; see `SPEC.md` §19
-  for scope and acceptance criteria).
+- **Milestone:** M4 — Storage & snapshots (M1 — Skeleton, M2 — Containers and M3 — Auth + UI
+  are done; see `SPEC.md` §19 for scope and acceptance criteria).
 - Work milestone by milestone. Do not start features from a later milestone unless asked.
 - When a milestone's acceptance criteria pass, update this line.
 
@@ -66,8 +66,9 @@ cargo build --workspace --all-targets --features lxc-integration
 sudo -E env "PATH=$PATH" cargo test --workspace --features lxc-integration -- --test-threads=1
 
 # Frontend
-cd web && npm install && npm run dev      # dev server, proxies /api to arilboxd
-cd web && npm run build                   # outputs web/dist, served by arilboxd
+cd web && npm install && npm run dev      # dev server, proxies /api to arilboxd (ARILBOX_URL)
+cd web && npm run check                   # svelte-check + i18n key check (must pass)
+cd web && npm run build                   # outputs web/dist, served by arilboxd (paths.web_dir)
 
 # Run the daemon locally: real LXC (root) or the in-memory mock (no root)
 cargo build -p arilbox-daemon && sudo ./target/debug/arilboxd --config packaging/dev-config.toml

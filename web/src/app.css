@@ -1,0 +1,416 @@
+/* Arilbox UI. Logical properties only (inline/block), so RTL can be added later (SPEC.md §15). */
+
+:root {
+  --bg: #f6f6f4;
+  --surface: #ffffff;
+  --surface-2: #f0efec;
+  --border: #dedcd7;
+  --text: #1d1c1a;
+  --muted: #6b6862;
+  --accent: #a8293a;
+  --accent-text: #ffffff;
+  --accent-soft: #f6e3e5;
+  --ok: #1f7a4d;
+  --ok-soft: #dcf1e6;
+  --warn: #8a5a00;
+  --warn-soft: #fbefd5;
+  --danger: #b42318;
+  --danger-soft: #fde4e1;
+  --info: #2457a6;
+  --info-soft: #e1ebfa;
+  --focus: #2f6fdb;
+  --shadow: 0 1px 2px rgb(0 0 0 / 6%), 0 4px 16px rgb(0 0 0 / 6%);
+  --radius: 8px;
+  --mono: ui-monospace, 'SFMono-Regular', 'DejaVu Sans Mono', Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, 'Segoe UI', Roboto, 'Noto Sans', Ubuntu, sans-serif;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --bg: #141312;
+    --surface: #1d1c1a;
+    --surface-2: #262522;
+    --border: #36342f;
+    --text: #ecebe8;
+    --muted: #a19d95;
+    --accent: #e0596a;
+    --accent-text: #1a0a0c;
+    --accent-soft: #3a1d21;
+    --ok: #5cc98f;
+    --ok-soft: #173525;
+    --warn: #e5b04a;
+    --warn-soft: #3a2e14;
+    --danger: #f2776b;
+    --danger-soft: #3d1c19;
+    --info: #79a6ef;
+    --info-soft: #1b2a42;
+    --focus: #79a6ef;
+    --shadow: 0 1px 2px rgb(0 0 0 / 40%), 0 4px 16px rgb(0 0 0 / 30%);
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme='dark'] {
+  --bg: #141312;
+  --surface: #1d1c1a;
+  --surface-2: #262522;
+  --border: #36342f;
+  --text: #ecebe8;
+  --muted: #a19d95;
+  --accent: #e0596a;
+  --accent-text: #1a0a0c;
+  --accent-soft: #3a1d21;
+  --ok: #5cc98f;
+  --ok-soft: #173525;
+  --warn: #e5b04a;
+  --warn-soft: #3a2e14;
+  --danger: #f2776b;
+  --danger-soft: #3d1c19;
+  --info: #79a6ef;
+  --info-soft: #1b2a42;
+  --focus: #79a6ef;
+  --shadow: 0 1px 2px rgb(0 0 0 / 40%), 0 4px 16px rgb(0 0 0 / 30%);
+  color-scheme: dark;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+
+h1,
+h2,
+h3 {
+  line-height: 1.25;
+  margin-block: 0 0.75rem;
+}
+h1 {
+  font-size: 1.5rem;
+}
+h2 {
+  font-size: 1.1rem;
+}
+h3 {
+  font-size: 1rem;
+}
+
+code,
+.mono {
+  font-family: var(--mono);
+  font-size: 0.9em;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* Buttons */
+button,
+.button {
+  font: inherit;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding-block: 0.4rem;
+  padding-inline: 0.85rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  white-space: nowrap;
+}
+button:hover:not(:disabled) {
+  background: var(--surface-2);
+}
+button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+button.primary:hover:not(:disabled) {
+  filter: brightness(1.08);
+  background: var(--accent);
+}
+button.danger {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+button.danger.solid {
+  background: var(--danger);
+  color: #fff;
+}
+button.small {
+  padding-block: 0.15rem;
+  padding-inline: 0.55rem;
+  font-size: 0.85rem;
+}
+button.link {
+  border: none;
+  background: none;
+  color: var(--accent);
+  padding: 0;
+}
+
+/* Forms */
+label {
+  display: block;
+  font-weight: 500;
+  margin-block-end: 0.25rem;
+}
+.field {
+  margin-block-end: 1rem;
+}
+.field .hint {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin-block-start: 0.2rem;
+}
+input[type='text'],
+input[type='password'],
+input[type='number'],
+select {
+  font: inherit;
+  inline-size: 100%;
+  padding-block: 0.45rem;
+  padding-inline: 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+}
+input[aria-invalid='true'] {
+  border-color: var(--danger);
+}
+.check {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: normal;
+}
+.grid-2 {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: 0 1rem;
+}
+
+/* Surfaces */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1.1rem;
+  box-shadow: var(--shadow);
+}
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  gap: 1rem;
+  margin-block-end: 1rem;
+}
+.page-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-block-end: 1rem;
+}
+.page-head h1 {
+  margin: 0;
+}
+.actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.muted {
+  color: var(--muted);
+}
+.empty {
+  color: var(--muted);
+  text-align: center;
+  padding: 2rem 1rem;
+}
+
+/* Tables */
+.table-wrap {
+  overflow-x: auto;
+}
+table {
+  inline-size: 100%;
+  border-collapse: collapse;
+}
+th,
+td {
+  text-align: start;
+  padding-block: 0.55rem;
+  padding-inline: 0.6rem;
+  border-block-end: 1px solid var(--border);
+  vertical-align: middle;
+}
+th {
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  font-weight: 600;
+}
+tr:last-child td {
+  border-block-end: none;
+}
+
+/* Key/value lists */
+dl.kv {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.35rem 1rem;
+  margin: 0;
+}
+dl.kv dt {
+  color: var(--muted);
+}
+dl.kv dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Status */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding-block: 0.1rem;
+  padding-inline: 0.55rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  background: var(--surface-2);
+  color: var(--muted);
+}
+.badge::before {
+  content: '';
+  inline-size: 0.5rem;
+  block-size: 0.5rem;
+  border-radius: 50%;
+  background: currentcolor;
+}
+.badge.ok {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+.badge.warn {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+.badge.danger {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+.badge.info {
+  background: var(--info-soft);
+  color: var(--info);
+}
+
+.alert {
+  padding-block: 0.6rem;
+  padding-inline: 0.8rem;
+  border-radius: 6px;
+  margin-block-end: 1rem;
+  background: var(--danger-soft);
+  color: var(--danger);
+  border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent);
+}
+.alert.info {
+  background: var(--info-soft);
+  color: var(--info);
+  border-color: color-mix(in srgb, var(--info) 30%, transparent);
+}
+.alert.ok {
+  background: var(--ok-soft);
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 30%, transparent);
+}
+
+/* Tabs */
+.tabs {
+  display: flex;
+  gap: 0.25rem;
+  border-block-end: 1px solid var(--border);
+  margin-block-end: 1rem;
+  overflow-x: auto;
+}
+.tabs button {
+  border: none;
+  border-radius: 0;
+  background: none;
+  border-block-end: 2px solid transparent;
+  color: var(--muted);
+  padding-block: 0.5rem;
+}
+.tabs button[aria-selected='true'] {
+  color: var(--text);
+  border-block-end-color: var(--accent);
+}
+
+/* Dialogs */
+dialog {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  padding: 0;
+  inline-size: min(36rem, calc(100vw - 2rem));
+  max-block-size: calc(100vh - 2rem);
+  box-shadow: var(--shadow);
+}
+dialog::backdrop {
+  background: rgb(0 0 0 / 45%);
+}
+dialog .dialog-body {
+  padding: 1.25rem;
+}
+dialog .dialog-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  padding: 0.9rem 1.25rem;
+  border-block-start: 1px solid var(--border);
+  background: var(--surface-2);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .spin {
+    animation: spin 1s linear infinite;
+  }
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

@@ -1,11 +1,14 @@
 //! Route table for `/api/v1`.
 //!
-//! No authentication until M3 (sessions, `SPEC.md` §12); until then the daemon is for
-//! development only. The CSRF header and the audit log already apply. `/health` stays public.
+//! Everything needs a session (`401 unauthenticated`) except `/health`, first-run setup and
+//! login. The CSRF header and the audit log apply to every mutating request.
 
+mod auth;
+mod console;
 mod containers;
 mod host;
 mod jobs;
+mod storage;
 
 use axum::Router;
 use axum::routing::{get, post};
@@ -13,12 +16,20 @@ use serde_json::{Value, json};
 
 use crate::AppState;
 use crate::error::ApiError;
+use crate::middleware::require_session;
 
 /// Routes mounted under `/api/v1`.
-pub(crate) fn v1() -> Router<AppState> {
-    Router::new()
+pub(crate) fn v1(state: &AppState) -> Router<AppState> {
+    let public = Router::new()
         .route("/health", get(health))
+        .route("/auth/setup", get(auth::setup_status).post(auth::setup))
+        .route("/auth/login", post(auth::login));
+    let protected = Router::new()
+        .route("/auth/logout", post(auth::logout))
+        .route("/auth/me", get(auth::me))
+        .route("/auth/password", post(auth::change_password))
         .route("/host", get(host::info))
+        .route("/host/stats", get(host::stats))
         .route("/host/capabilities", get(host::capabilities))
         .route(
             "/containers",
@@ -31,9 +42,17 @@ pub(crate) fn v1() -> Router<AppState> {
         .route("/containers/{name}/start", post(containers::start))
         .route("/containers/{name}/stop", post(containers::stop))
         .route("/containers/{name}/restart", post(containers::restart))
+        .route("/containers/{name}/console", get(console::console))
+        .route("/storage", get(storage::pools))
+        .route("/templates", get(storage::templates))
         .route("/jobs", get(jobs::list))
         .route("/jobs/{id}", get(jobs::get))
         .route("/jobs/{id}/events", get(jobs::events))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_session,
+        ));
+    public.merge(protected)
 }
 
 /// `GET /api/v1/health`: liveness check.
@@ -50,7 +69,7 @@ pub(crate) async fn not_found() -> ApiError {
 pub(crate) mod tests {
     use std::sync::Arc;
 
-    use arilbox_core::host::{Capabilities, HostInfo, HostProbe};
+    use arilbox_core::host::{Capabilities, HostInfo, HostProbe, HostStats};
     use arilxc::MockBackend;
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
@@ -94,18 +113,84 @@ pub(crate) mod tests {
                 cgroup_v2: true,
             }
         }
+
+        fn stats(&self) -> arilbox_core::Result<HostStats> {
+            Ok(HostStats {
+                cpu_percent: 12.5,
+                memory_total_bytes: 1000,
+                memory_used_bytes: 400,
+                swap_total_bytes: 0,
+                swap_used_bytes: 0,
+                load: [0.5, 0.25, 0.0],
+                uptime_s: 42,
+            })
+        }
     }
+
+    /// Password of the test admin user.
+    pub(crate) const PASSWORD: &str = "test password 1";
 
     /// Router plus handles on its state, backed by the mock backend and in-memory SQLite.
     pub(crate) struct TestApp {
+        /// Adds the admin's session cookie to requests that carry no `Cookie` header.
         pub router: axum::Router,
+        /// The same app without a session.
+        pub anon: axum::Router,
+        /// `Cookie` header value of the admin session.
+        pub cookie: String,
         pub state: AppState,
         pub backend: Arc<MockBackend>,
     }
 
+    /// An app with the admin user set up and logged in.
     pub(crate) async fn test_app(fail: bool) -> TestApp {
+        let app = fresh_app(fail).await;
+        let token = app.state.auth.start_setup().await.unwrap().unwrap();
+        let session = app
+            .state
+            .auth
+            .complete_setup(
+                std::net::Ipv4Addr::LOCALHOST.into(),
+                &token,
+                arilbox_core::Username::new("admin").unwrap(),
+                PASSWORD,
+            )
+            .await
+            .unwrap();
+        let cookie = format!("{}={}", crate::auth::SESSION_COOKIE, session.token);
+        let with_cookie = cookie.clone();
+        let router = app.anon.clone().layer(axum::middleware::map_request(
+            move |mut req: Request<Body>| {
+                let cookie = with_cookie.clone();
+                async move {
+                    if !req.headers().contains_key("cookie") {
+                        req.headers_mut().insert("cookie", cookie.parse().unwrap());
+                    }
+                    req
+                }
+            },
+        ));
+        TestApp {
+            router,
+            cookie,
+            ..app
+        }
+    }
+
+    /// An app before first-run setup (no users).
+    pub(crate) async fn fresh_app(fail: bool) -> TestApp {
         let backend = Arc::new(MockBackend::new());
         let db = crate::db::memory().await.unwrap();
+        let auth = Arc::new(
+            crate::auth::Auth::new(
+                db.clone(),
+                crate::auth::AuthConfig {
+                    hash: crate::auth::HashParams::INSECURE_FAST,
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        );
         let mut jobs = crate::jobs::Jobs::new(db.clone(), backend.clone());
         jobs.network_timeout = std::time::Duration::from_millis(200);
         let state = AppState {
@@ -113,6 +198,7 @@ pub(crate) mod tests {
             host: Arc::new(FakeProbe { fail }),
             jobs,
             db,
+            auth,
             settings: Arc::new(Settings {
                 storage: vec![
                     StoragePool::Dir {
@@ -128,10 +214,14 @@ pub(crate) mod tests {
                 default_template: TemplateRef::default(),
                 managed_bridge: BridgeName::new("arilbox0").unwrap(),
                 sys: arilbox_net::Sys::new("/nonexistent-arilbox-test-sys"),
+                web_dir: None,
             }),
         };
+        let anon = router(state.clone());
         TestApp {
-            router: router(state.clone()),
+            router: anon.clone(),
+            anon,
+            cookie: String::new(),
             state,
             backend,
         }

@@ -9,6 +9,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Context;
+use arilbox_api::auth::{Auth, AuthConfig};
 use arilbox_api::jobs::Jobs;
 use arilbox_api::{AppState, Settings};
 use arilbox_core::config::{BackendKind, Config, StoragePool};
@@ -147,17 +148,49 @@ async fn run(config: Config) -> anyhow::Result<()> {
         );
     }
 
+    let auth = Arc::new(
+        Auth::new(
+            db.clone(),
+            AuthConfig {
+                secure_cookie: config.server.tls,
+                ..AuthConfig::default()
+            },
+        )
+        .context("password hashing parameters")?,
+    );
+    if let Some(token) = auth.start_setup().await.context("checking for users")? {
+        let scheme = if config.server.tls { "https" } else { "http" };
+        // The one place a secret is logged on purpose (SPEC.md §12): it is single-use, only
+        // valid until an admin exists, and replaced on every restart.
+        tracing::warn!(
+            "first-run setup: no admin user yet. Open {scheme}://<this host>:{port}/setup?token={token}",
+            port = config.server.bind.port(),
+        );
+    }
+
+    let web_dir = config
+        .paths
+        .web_dir
+        .join("index.html")
+        .is_file()
+        .then(|| config.paths.web_dir.clone());
+    if web_dir.is_none() {
+        tracing::warn!(dir = %config.paths.web_dir.display(), "web UI not found; serving the API only");
+    }
+
     let state = AppState {
         containers,
         host: Arc::new(probe),
         jobs,
         db,
+        auth,
         settings: Arc::new(Settings {
             storage: config.storage.clone(),
             default_storage: config.defaults.storage.clone(),
             default_template: config.defaults.template.clone(),
             managed_bridge: config.network.bridge.clone(),
             sys: Sys::default(),
+            web_dir,
         }),
     };
     let app = arilbox_api::router(state);
@@ -173,6 +206,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
     } else {
         // Config validation only allows this with dev_mode = true.
         tracing::warn!(bind = %config.server.bind, "listening on PLAIN HTTP (dev mode)");
+        let app = app.into_make_service_with_connect_info::<std::net::SocketAddr>();
         axum::serve(listener, app)
             .with_graceful_shutdown(shutdown_signal())
             .await

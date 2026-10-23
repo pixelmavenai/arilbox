@@ -195,11 +195,48 @@ pub struct Output {
     pub stderr: Vec<u8>,
 }
 
+/// Terminal size in character cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TermSize {
+    /// Rows.
+    pub rows: u16,
+    /// Columns.
+    pub cols: u16,
+}
+
+/// A program running on a pseudo-terminal (see [`Exec::spawn_pty`]).
+pub struct PtyChild {
+    /// The terminal's master side: read the program's output, write its input, resize it.
+    pub pty: pty_process::Pty,
+    /// The process. Killed when dropped.
+    pub child: tokio::process::Child,
+}
+
+impl fmt::Debug for PtyChild {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PtyChild")
+            .field("pid", &self.child.id())
+            .finish_non_exhaustive()
+    }
+}
+
 /// Runs commands. Real in production, [`RecordingExec`] in tests.
 #[async_trait::async_trait]
 pub trait Exec: Send + Sync {
     /// Runs `spec` to completion. Non-zero exit is [`ExecError::Failed`].
     async fn run(&self, spec: CommandSpec) -> Result<Output, ExecError>;
+
+    /// Starts `spec` on a new pseudo-terminal of `size`, as the session leader with the
+    /// terminal as its controlling tty, for interactive use (container consoles). There is no
+    /// timeout, no stdin from the spec and no output cap; the caller owns the I/O. The default
+    /// implementation refuses, for test doubles that don't support terminals.
+    fn spawn_pty(&self, spec: &CommandSpec, size: TermSize) -> Result<PtyChild, ExecError> {
+        let _ = size;
+        Err(ExecError::Spawn {
+            program: spec.program,
+            source: std::io::ErrorKind::Unsupported.into(),
+        })
+    }
 }
 
 /// Absolute paths of allow-listed programs, resolved once at start-up.
@@ -285,6 +322,21 @@ impl RealExec {
 
 #[async_trait::async_trait]
 impl Exec for RealExec {
+    fn spawn_pty(&self, spec: &CommandSpec, size: TermSize) -> Result<PtyChild, ExecError> {
+        let program = spec.program;
+        let spawn = |e: pty_process::Error| ExecError::Spawn {
+            program,
+            source: std::io::Error::other(e),
+        };
+        let (pty, pts) = pty_process::open().map_err(spawn)?;
+        pty.resize(pty_process::Size::new(size.rows, size.cols))
+            .map_err(spawn)?;
+        let child = pty_process::Command::from(self.command(spec)?)
+            .spawn(pts)
+            .map_err(spawn)?;
+        Ok(PtyChild { pty, child })
+    }
+
     async fn run(&self, spec: CommandSpec) -> Result<Output, ExecError> {
         let program = spec.program;
         let mut child = self
@@ -373,7 +425,7 @@ async fn read_bounded<R: AsyncRead + Unpin>(reader: Option<R>) -> std::io::Resul
 }
 
 /// Test double: records every spec and returns scripted results in order (empty success once
-/// the script runs out).
+/// the script runs out). [`Exec::spawn_pty`] is recorded too, then refused.
 #[derive(Debug, Default)]
 pub struct RecordingExec {
     calls: Mutex<Vec<CommandSpec>>,
@@ -404,6 +456,14 @@ impl Exec for RecordingExec {
         lock(&self.responses)
             .pop_front()
             .unwrap_or_else(|| Ok(Output::default()))
+    }
+
+    fn spawn_pty(&self, spec: &CommandSpec, _size: TermSize) -> Result<PtyChild, ExecError> {
+        lock(&self.calls).push(spec.clone());
+        Err(ExecError::Spawn {
+            program: spec.program,
+            source: std::io::ErrorKind::Unsupported.into(),
+        })
     }
 }
 
@@ -518,6 +578,41 @@ mod tests {
                 program: Program::Zfs
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn pty_child_sees_a_terminal_of_the_requested_size() {
+        let exec = exec_with("stty");
+        let PtyChild { mut pty, mut child } = exec
+            .spawn_pty(
+                &CommandSpec::new(Program::Ip, ["size"]),
+                TermSize {
+                    rows: 37,
+                    cols: 101,
+                },
+            )
+            .unwrap();
+        child.wait().await.unwrap();
+        let mut out = Vec::new();
+        let mut buf = [0u8; 256];
+        // Reading the master after the child is gone ends in EIO on Linux.
+        while let Ok(Ok(n @ 1..)) =
+            tokio::time::timeout(Duration::from_secs(5), pty.read(&mut buf)).await
+        {
+            out.extend_from_slice(&buf[..n]);
+        }
+        assert_eq!(String::from_utf8_lossy(&out).trim(), "37 101");
+    }
+
+    #[tokio::test]
+    async fn recording_exec_refuses_pty() {
+        let exec = RecordingExec::new();
+        let spec = CommandSpec::new(Program::LxcAttach, ["-n", "x"]);
+        let err = exec
+            .spawn_pty(&spec, TermSize { rows: 1, cols: 1 })
+            .unwrap_err();
+        assert!(matches!(err, ExecError::Spawn { .. }));
+        assert_eq!(exec.calls(), vec![spec]);
     }
 
     #[tokio::test]

@@ -6,6 +6,7 @@
 
 mod backend;
 pub mod config;
+mod console;
 mod error;
 mod fsutil;
 pub mod lxc_cli;
@@ -14,6 +15,7 @@ pub mod template;
 mod types;
 
 pub use backend::ContainerBackend;
+pub use console::{Console, ConsoleInput, TermSize};
 pub use error::{Error, Result};
 pub use lxc_cli::LxcCli;
 pub use mock::MockBackend;

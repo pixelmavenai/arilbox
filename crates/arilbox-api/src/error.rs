@@ -17,6 +17,8 @@ pub struct ApiError {
     pub code: &'static str,
     /// Human-readable English message.
     pub message: String,
+    /// Seconds for a `Retry-After` header (`429` responses).
+    pub retry_after_s: Option<u64>,
 }
 
 impl ApiError {
@@ -26,7 +28,14 @@ impl ApiError {
             status,
             code,
             message: message.into(),
+            retry_after_s: None,
         }
+    }
+
+    /// Adds a `Retry-After` header.
+    pub fn retry_after(mut self, secs: u64) -> Self {
+        self.retry_after_s = Some(secs);
+        self
     }
 
     /// `404 not_found` for unknown routes.
@@ -44,10 +53,29 @@ impl ApiError {
     }
 }
 
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} {}: {}",
+            self.status.as_u16(),
+            self.code,
+            self.message
+        )
+    }
+}
+
+impl std::error::Error for ApiError {}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let body = json!({ "error": { "code": self.code, "message": self.message } });
-        (self.status, Json(body)).into_response()
+        let mut res = (self.status, Json(body)).into_response();
+        if let Some(secs) = self.retry_after_s {
+            res.headers_mut()
+                .insert(axum::http::header::RETRY_AFTER, secs.into());
+        }
+        res
     }
 }
 
@@ -58,6 +86,7 @@ impl From<arilbox_core::Error> for ApiError {
                 let code = match kind {
                     "container name" | "snapshot name" | "storage name" | "bridge name"
                     | "dataset path" => "invalid_name",
+                    "username" => "invalid_username",
                     _ => "invalid_request",
                 };
                 Self::new(

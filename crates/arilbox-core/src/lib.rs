@@ -8,4 +8,4 @@ pub mod host;
 pub mod name;
 
 pub use error::{Error, Result};
-pub use name::{BridgeName, ContainerName, DatasetPath, SnapshotName, StorageName};
+pub use name::{BridgeName, ContainerName, DatasetPath, SnapshotName, StorageName, Username};

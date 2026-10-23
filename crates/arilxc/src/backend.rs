@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use arilbox_core::{ContainerName, SnapshotName};
 
+use crate::console::{Console, TermSize};
 use crate::error::Result;
 use crate::types::{ContainerInfo, CreateSpec, ExecOutput, Limits, SnapshotInfo};
 
@@ -36,4 +37,6 @@ pub trait ContainerBackend: Send + Sync {
     async fn list_snapshots(&self, name: &ContainerName) -> Result<Vec<SnapshotInfo>>;
     /// Runs a command inside a running container (argument vector, no shell).
     async fn exec(&self, name: &ContainerName, cmd: &[String]) -> Result<ExecOutput>;
+    /// Opens an interactive root shell in a running container on a terminal of `size`.
+    async fn console(&self, name: &ContainerName, size: TermSize) -> Result<Console>;
 }

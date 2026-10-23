@@ -253,7 +253,9 @@ rpool/arilbox/volumes/<name>/<volume>    # data volumes, mounted into containers
 
 ## 7. REST API (v1)
 
-Base path: `/api/v1`. JSON in and out. Auth via session cookie (§12). Errors use:
+Base path: `/api/v1`. JSON in and out. Auth via session cookie (§12): every endpoint needs a
+valid session (`401 unauthenticated`) except `/health`, `/auth/setup` and `/auth/login`. Errors
+use:
 
 ```json
 { "error": { "code": "container_not_found", "message": "Container 'web' does not exist" } }
@@ -264,9 +266,11 @@ Base path: `/api/v1`. JSON in and out. Auth via session cookie (§12). Errors us
 | 200 / 201 | Success (synchronous) |
 | 202 | Job accepted — body `{ "job_id": "..." }` |
 | 400 | Validation error |
+| 204 | Success without a body (logout, password change) |
 | 401 / 403 | Not logged in / CSRF failure |
 | 404 | Not found |
 | 409 | Conflict (name exists, wrong state) |
+| 429 | Too many failed login attempts (`Retry-After` header in seconds) |
 | 500 | Internal error (logged with request ID) |
 
 Every response carries an `X-Request-Id` header (the client's value if it sent one, otherwise a
@@ -282,17 +286,25 @@ generated UUID). The same ID appears in the daemon's log lines for that request.
 
 | Method | Path | Description |
 |---|---|---|
-| POST | `/auth/login` | `{ "username", "password" }` → sets session cookie |
-| POST | `/auth/logout` | Ends session |
-| GET | `/auth/me` | Current user |
-| POST | `/auth/password` | Change password `{ "current", "new" }` |
+| GET | `/auth/setup` | Public. `{ "required": bool }`: true until the admin user exists |
+| POST | `/auth/setup` | Public. `{ "token", "username", "password" }` → 201 `{ "username" }` + session cookie |
+| POST | `/auth/login` | Public. `{ "username", "password" }` → 200 `{ "username" }` + session cookie |
+| POST | `/auth/logout` | Ends the session → 204, cookie cleared |
+| GET | `/auth/me` | Current user, `{ "username" }` |
+| POST | `/auth/password` | Change password `{ "current", "new" }` → 204; the user's other sessions end |
+
+Error codes: `invalid_username` (400), `weak_password` (400, fewer than 10 characters),
+`wrong_password` (400, `current` is wrong), `invalid_credentials` (401),
+`invalid_setup_token` (403), `setup_required` (409, login before setup), `setup_done` (409),
+`too_many_attempts` (429). Login, setup and password change share the per-IP failure limit.
+Usernames match `^[a-z_][a-z0-9_-]{0,31}$`; passwords are 10 characters to 1024 bytes.
 
 ### 7.2 Host
 
 | Method | Path | Description |
 |---|---|---|
 | GET | `/host` | Hostname, OS, kernel, uptime, CPU/RAM totals, platform version (see below) |
-| GET | `/host/stats` | Current CPU %, memory, load, per-pool usage |
+| GET | `/host/stats` | Current CPU %, memory, swap, load (see below; per-pool usage arrives with M4) |
 | GET | `/host/gpus` | Detected GPUs (via `nvidia-smi --query-gpu ... --format=csv`), memory, utilization |
 | GET | `/host/capabilities` | `{ "zfs": bool, "nvidia": bool, "kvm": bool, "cgroup_v2": bool }` |
 
@@ -307,6 +319,18 @@ generated UUID). The same ID appears in the daemon's log lines for that request.
   "cpu_count": 16,
   "memory_total_bytes": 68719476736,
   "platform_version": "0.1.0"
+}
+```
+
+`GET /host/stats` response (`cpu_percent` is measured since the previous call):
+
+```json
+{
+  "cpu_percent": 12.5,
+  "memory_total_bytes": 68719476736, "memory_used_bytes": 8589934592,
+  "swap_total_bytes": 0, "swap_used_bytes": 0,
+  "load": [0.5, 0.25, 0.1],
+  "uptime_s": 86400
 }
 ```
 
@@ -326,7 +350,7 @@ Capability detection: `zfs` = `/dev/zfs` exists; `nvidia` = `nvidia-smi` install
 | POST | `/containers/{name}/start` | → 202 job (`409 container_running` unless stopped) |
 | POST | `/containers/{name}/stop` | Body optional, `{ "timeout_s": 30 }` (1–600) → 202 job (`409 container_stopped` unless running) |
 | POST | `/containers/{name}/restart` | Body as stop → 202 job; a stopped container is just started |
-| GET | `/containers/{name}/console` | WebSocket: interactive console (`lxc-console` / `lxc-attach` PTY) |
+| GET | `/containers/{name}/console?rows=24&cols=80` | WebSocket: interactive root shell (`lxc-attach` on a PTY), see below |
 | GET | `/containers/{name}/stats` | CPU, memory, network counters |
 
 Create request:
@@ -361,6 +385,20 @@ unknown field, bad query), `invalid_template`, `invalid_storage`, `invalid_limit
 `invalid_bridge`, `unsupported`, `csrf_failed` (403), `container_not_found` (404),
 `container_exists`, `container_running`, `container_stopped`, `container_wrong_state`,
 `storage_unavailable`, `gpu_unavailable`, `target_busy` (409).
+
+Console protocol: binary frames carry raw terminal bytes in both directions; text frames from
+the client are JSON control messages, `{ "type": "resize", "rows": 40, "cols": 120 }`
+(1–1000 each). The server closes the socket when the shell exits, and closing the socket ends
+the shell. Because browsers cannot add the CSRF header to a WebSocket handshake, the `Origin`
+header must match the request's host (`403 origin_mismatch`). The container must be running
+(`409 container_stopped`).
+
+Choices for the create form:
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/storage` | Configured pools: `[{ "name", "type": "zfs"\|"dir", "available", "default" }]` |
+| GET | `/templates` | Allowed templates (§5.5): `[{ "distro", "release", "default" }]` |
 
 ### 7.4 Snapshots
 
@@ -572,17 +610,30 @@ on failure **restore snapshot automatically** and mark job failed with reason.
 
 ## 12. Authentication & security
 
-- **Single admin user** in v1, created at first start: daemon prints a one-time setup URL with a
-  token to the journal; the first visit sets username + password.
-- Passwords hashed with **argon2id** (memory 64 MiB, iterations 3, parallelism 1).
-- Sessions: random 256-bit ID, server-side in SQLite, cookie `HttpOnly; Secure; SameSite=Strict`,
-  idle timeout 8 h, absolute timeout 7 days.
-- CSRF: `SameSite=Strict` + required header `X-Arilbox-Request: 1` on all mutating requests.
-- Login rate limiting: 5 failures / 15 min per IP, then backoff.
+- **Single admin user** in v1, created at first start: while no user exists, the daemon prints a
+  one-time setup URL with a random 256-bit token to the journal (`/setup?token=…`); the first
+  visit sets username + password. The token is single-use, replaced on every restart and only
+  its hash is kept in memory. This is the only secret ever logged.
+- Passwords hashed with **argon2id** (memory 64 MiB, iterations 3, parallelism 1), at most two
+  hashes at a time. Logins for unknown users verify against a dummy hash so timing does not
+  reveal which usernames exist.
+- Sessions: random 256-bit ID, server-side in SQLite (only its SHA-256 is stored), cookie
+  `arilbox_session` with `Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=604800`
+  (`Secure` is dropped only for plain-HTTP dev mode), idle timeout 8 h, absolute timeout 7 days.
+  Changing the password ends the user's other sessions.
+- CSRF: `SameSite=Strict` + required header `X-Arilbox-Request: 1` on all mutating requests;
+  the console WebSocket checks `Origin` instead (§7.3).
+- Login rate limiting: 5 failures / 15 min per client IP (login, setup and password change),
+  then `429 too_many_attempts` until the oldest failure leaves the window. Kept in memory. Behind
+  a reverse proxy all clients share the proxy's IP.
+- Security headers on every response: a strict `Content-Security-Policy` (same origin only, no
+  inline scripts, `frame-ancestors 'none'`), `X-Content-Type-Options: nosniff`,
+  `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`. API responses are `no-store`.
 - HTTPS only (`rustls`), default bind `0.0.0.0:8443`; self-signed cert generated at first start
   in `/etc/arilbox/tls/`; user can replace cert and key.
 - Containers unprivileged with generated AppArmor profiles; no privileged mode in v1.
 - Audit log table: login, logout, failed login, every mutating API call (user, action, target, time).
+  Failed logins record the attempted username as the target and no user.
 - Optional TOTP 2FA: **later** (M6).
 
 ---
@@ -616,8 +667,15 @@ on failure **restore snapshot automatically** and mark job failed with reason.
 | Settings | Storage pools, network, TLS cert, password |
 
 - Responsive down to phone width.
-- Light/dark theme.
-- All strings through `t('key')` (see §15).
+- Light/dark theme (follows the system unless chosen in Settings).
+- All strings through `t('key')` (see §15). Server error `code`s are translated as
+  `error.<code>`, job steps as `step.<id>`.
+- Single-page app with History-API routes (`/`, `/setup`, `/login`, `/containers`,
+  `/containers/{name}`, `/jobs`, `/jobs/{id}`, `/settings`); the daemon answers every non-`/api`
+  path it has no file for with `index.html`. Built assets live under `/assets/` with hashed names.
+- M3 ships login/setup, dashboard (without disk and GPU details), containers, container detail
+  (overview, console, jobs), jobs and settings (password, theme). Limits editing, snapshots and
+  volumes arrive with M4; catalog pages with M5.
 
 ---
 
@@ -648,6 +706,7 @@ dev_mode = false                       # human-readable logs; permits plain HTTP
 [paths]
 data_dir = "/var/lib/arilbox"          # SQLite DB, job logs
 catalog_dir = "/usr/share/arilbox/catalog"
+web_dir = "/usr/share/arilbox/web"     # built UI (web/dist); API only if index.html is missing
 
 [containers]
 backend = "lxc"                        # "mock" (in-memory) only allowed with dev_mode = true

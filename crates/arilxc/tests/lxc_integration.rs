@@ -18,7 +18,10 @@ use std::time::Duration;
 use arilbox_core::config::{StoragePool, TemplateRef};
 use arilbox_core::exec::{Program, ProgramPaths, RealExec};
 use arilbox_core::{BridgeName, ContainerName, StorageName};
-use arilxc::{ContainerBackend, ContainerState, CreateSpec, Limits, LxcCli, NetworkSpec};
+use arilxc::{
+    Console, ContainerBackend, ContainerState, CreateSpec, Limits, LxcCli, NetworkSpec, TermSize,
+};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const LXC_PATH: &str = "/var/lib/lxc";
 const POOL: &str = "/var/lib/arilbox/test";
@@ -139,6 +142,47 @@ async fn create_start_inspect_stop_destroy() {
         .unwrap();
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "536870912");
 
+    // Console: a shell on a terminal of our size that follows resizes and ends on `exit`.
+    let mut console = b
+        .console(
+            &name,
+            TermSize {
+                rows: 33,
+                cols: 111,
+            },
+        )
+        .await
+        .expect("console");
+    // Input sent before the shell is up is discarded when lxc-attach switches the terminal
+    // to raw mode, so wait for root's prompt first.
+    read_until(&mut console, &["# "]).await;
+    console
+        .input
+        .write_all(b"stty size; echo marker-$((40+2))\r")
+        .await
+        .unwrap();
+    read_until(&mut console, &["33 111", "marker-42"]).await;
+    console
+        .input
+        .resize(TermSize {
+            rows: 44,
+            cols: 122,
+        })
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    console.input.write_all(b"stty size\r").await.unwrap();
+    read_until(&mut console, &["44 122"]).await;
+    console.input.write_all(b"exit\r").await.unwrap();
+    let mut buf = [0u8; 4096];
+    let ended = tokio::time::timeout(Duration::from_secs(10), async {
+        while let Ok(n @ 1..) = console.output.read(&mut buf).await {
+            let _ = n;
+        }
+    })
+    .await;
+    assert!(ended.is_ok(), "console output ends after exit");
+    drop(console);
+
     b.stop(&name, Duration::from_secs(30)).await.expect("stop");
     assert_eq!(b.info(&name).await.unwrap().state, ContainerState::Stopped);
 
@@ -164,4 +208,28 @@ async fn foreign_containers_are_invisible() {
                 .is_file()
         );
     }
+}
+
+/// Reads console output until every needle has appeared (20 s limit).
+async fn read_until(console: &mut Console, needles: &[&str]) {
+    let mut seen = Vec::new();
+    let mut buf = [0u8; 4096];
+    let found = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let text = String::from_utf8_lossy(&seen);
+            if needles.iter().all(|n| text.contains(n)) {
+                return;
+            }
+            match console.output.read(&mut buf).await {
+                Ok(n @ 1..) => seen.extend_from_slice(&buf[..n]),
+                _ => return,
+            }
+        }
+    })
+    .await;
+    let text = String::from_utf8_lossy(&seen);
+    assert!(
+        found.is_ok() && needles.iter().all(|n| text.contains(n)),
+        "wanted {needles:?} in console output: {text:?}"
+    );
 }

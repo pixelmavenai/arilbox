@@ -1,6 +1,6 @@
 //! `/api/v1/host` endpoints (`SPEC.md` §7.2).
 
-use arilbox_core::host::{Capabilities, HostInfo};
+use arilbox_core::host::{Capabilities, HostInfo, HostStats};
 use axum::Json;
 use axum::extract::State;
 
@@ -11,6 +11,11 @@ use crate::error::ApiError;
 pub(crate) async fn info(State(state): State<AppState>) -> Result<Json<HostInfo>, ApiError> {
     // Reads a handful of small procfs files; these never block on disk.
     Ok(Json(state.host.host_info()?))
+}
+
+/// `GET /api/v1/host/stats`: CPU, memory, swap and load right now.
+pub(crate) async fn stats(State(state): State<AppState>) -> Result<Json<HostStats>, ApiError> {
+    Ok(Json(state.host.stats()?))
 }
 
 /// `GET /api/v1/host/capabilities`: optional host features.
@@ -51,6 +56,24 @@ mod tests {
         assert!(
             !body.to_string().contains("meminfo"),
             "no internals: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stats_shape() {
+        let (status, _, body) = get(app(false).await, "/api/v1/host/stats").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            json!({
+                "cpu_percent": 12.5,
+                "memory_total_bytes": 1000,
+                "memory_used_bytes": 400,
+                "swap_total_bytes": 0,
+                "swap_used_bytes": 0,
+                "load": [0.5, 0.25, 0.0],
+                "uptime_s": 42
+            })
         );
     }
 

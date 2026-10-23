@@ -112,6 +112,13 @@ name_type!(
     validate_dataset_path
 );
 
+name_type!(
+    /// A login name: `^[a-z_][a-z0-9_-]{0,31}$` (the Unix user-name convention).
+    Username,
+    "username",
+    validate_username
+);
+
 fn is_lower_alnum(c: char) -> bool {
     c.is_ascii_lowercase() || c.is_ascii_digit()
 }
@@ -175,6 +182,24 @@ fn validate_bridge_name(value: &str) -> Result<(), &'static str> {
     }
     if value.len() > 15 {
         return Err("must be at most 15 characters");
+    }
+    if !chars.all(|c| is_lower_alnum(c) || matches!(c, '_' | '-')) {
+        return Err("may only contain lowercase letters, digits, '_' and '-'");
+    }
+    Ok(())
+}
+
+fn validate_username(value: &str) -> Result<(), &'static str> {
+    let mut chars = value.chars();
+    match chars.next() {
+        None => return Err("must not be empty"),
+        Some(c) if !(c.is_ascii_lowercase() || c == '_') => {
+            return Err("must start with a lowercase letter or '_'");
+        }
+        Some(_) => {}
+    }
+    if value.len() > 32 {
+        return Err("must be at most 32 characters");
     }
     if !chars.all(|c| is_lower_alnum(c) || matches!(c, '_' | '-')) {
         return Err("may only contain lowercase letters, digits, '_' and '-'");
@@ -301,6 +326,16 @@ mod tests {
     }
 
     #[test]
+    fn username_rules() {
+        for ok in ["admin", "_svc", "a", "ops-1", &"a".repeat(32)] {
+            assert!(Username::new(ok).is_ok(), "{ok:?} should be valid");
+        }
+        for bad in ["Admin", "1admin", "ad.min", "ad min", &"a".repeat(33)] {
+            assert!(Username::new(bad).is_err(), "{bad:?} should be rejected");
+        }
+    }
+
+    #[test]
     fn hostile_values_rejected_by_every_type() {
         for bad in HOSTILE {
             assert!(ContainerName::new(*bad).is_err(), "container {bad:?}");
@@ -308,6 +343,7 @@ mod tests {
             assert!(StorageName::new(*bad).is_err(), "storage {bad:?}");
             assert!(BridgeName::new(*bad).is_err(), "bridge {bad:?}");
             assert!(DatasetPath::new(*bad).is_err(), "dataset {bad:?}");
+            assert!(Username::new(*bad).is_err(), "username {bad:?}");
         }
     }
 

@@ -5,6 +5,7 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use serde::Serialize;
 
@@ -29,6 +30,25 @@ pub struct HostInfo {
     pub platform_version: String,
 }
 
+/// Current utilisation (`GET /api/v1/host/stats`).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct HostStats {
+    /// CPU busy time in percent of all CPUs since the previous call (since boot on the first).
+    pub cpu_percent: f64,
+    /// Total RAM in bytes.
+    pub memory_total_bytes: u64,
+    /// RAM in use: total minus `MemAvailable`.
+    pub memory_used_bytes: u64,
+    /// Total swap in bytes.
+    pub swap_total_bytes: u64,
+    /// Swap in use.
+    pub swap_used_bytes: u64,
+    /// Load averages over 1, 5 and 15 minutes.
+    pub load: [f64; 3],
+    /// Seconds since boot.
+    pub uptime_s: u64,
+}
+
 /// Optional host features (`GET /api/v1/host/capabilities`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
 pub struct Capabilities {
@@ -48,12 +68,16 @@ pub trait HostProbe: Send + Sync {
     fn host_info(&self) -> Result<HostInfo>;
     /// Detects capabilities. Never fails: anything unreadable counts as absent.
     fn capabilities(&self) -> Capabilities;
+    /// Reads current utilisation.
+    fn stats(&self) -> Result<HostStats>;
 }
 
 /// Reads the real host (root `/`) or a fake tree.
 #[derive(Debug, Clone)]
 pub struct SystemProbe {
     root: PathBuf,
+    /// CPU counters from the previous [`HostProbe::stats`] call.
+    last_cpu: Arc<Mutex<Option<CpuTimes>>>,
 }
 
 impl Default for SystemProbe {
@@ -65,7 +89,10 @@ impl Default for SystemProbe {
 impl SystemProbe {
     /// A probe that reads files under `root` instead of `/`.
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            last_cpu: Arc::default(),
+        }
     }
 
     fn path(&self, rel: &str) -> PathBuf {
@@ -114,6 +141,110 @@ impl HostProbe for SystemProbe {
             cgroup_v2: self.exists("sys/fs/cgroup/cgroup.controllers"),
         }
     }
+
+    fn stats(&self) -> Result<HostStats> {
+        let now = parse_cpu_times(&self.read("proc/stat")?)?;
+        let previous = self
+            .last_cpu
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .replace(now);
+        let mem = parse_meminfo(&self.read("proc/meminfo")?)?;
+        Ok(HostStats {
+            cpu_percent: now.busy_percent_since(previous.unwrap_or_default()),
+            memory_total_bytes: mem.total,
+            memory_used_bytes: mem.total.saturating_sub(mem.available),
+            swap_total_bytes: mem.swap_total,
+            swap_used_bytes: mem.swap_total.saturating_sub(mem.swap_free),
+            load: parse_loadavg(&self.read("proc/loadavg")?)?,
+            uptime_s: parse_uptime(&self.read("proc/uptime")?)?,
+        })
+    }
+}
+
+/// Aggregate CPU counters from the `cpu` line of `/proc/stat`, in clock ticks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct CpuTimes {
+    total: u64,
+    idle: u64,
+}
+
+impl CpuTimes {
+    /// Busy share of the time between `earlier` and `self`, 0–100 with one decimal.
+    fn busy_percent_since(self, earlier: CpuTimes) -> f64 {
+        let total = self.total.saturating_sub(earlier.total);
+        let idle = self.idle.saturating_sub(earlier.idle);
+        if total == 0 {
+            return 0.0;
+        }
+        // Tick counts fit f64 exactly for centuries of uptime.
+        #[allow(clippy::cast_precision_loss)]
+        let percent = (total.saturating_sub(idle)) as f64 * 100.0 / total as f64;
+        (percent * 10.0).round() / 10.0
+    }
+}
+
+/// `user nice system idle iowait irq softirq steal` from the `cpu` line (guest time is already
+/// counted in user).
+fn parse_cpu_times(text: &str) -> Result<CpuTimes> {
+    let fields: Vec<u64> = text
+        .lines()
+        .find_map(|l| l.strip_prefix("cpu "))
+        .ok_or_else(|| parse_error("stat"))?
+        .split_whitespace()
+        .take(8)
+        .map(str::parse)
+        .collect::<std::result::Result<_, _>>()
+        .map_err(|_| parse_error("stat"))?;
+    if fields.len() < 5 {
+        return Err(parse_error("stat"));
+    }
+    Ok(CpuTimes {
+        total: fields.iter().sum(),
+        idle: fields[3] + fields[4],
+    })
+}
+
+/// The `/proc/meminfo` fields [`HostStats`] needs, in bytes.
+#[derive(Debug, PartialEq, Eq)]
+struct MemInfo {
+    total: u64,
+    available: u64,
+    swap_total: u64,
+    swap_free: u64,
+}
+
+fn parse_meminfo(text: &str) -> Result<MemInfo> {
+    let field = |key: &str| -> Result<u64> {
+        let value = text
+            .lines()
+            .find_map(|l| l.strip_prefix(key).and_then(|r| r.strip_prefix(':')))
+            .ok_or_else(|| parse_error("meminfo"))?;
+        let kib: u64 = value
+            .trim()
+            .trim_end_matches("kB")
+            .trim()
+            .parse()
+            .map_err(|_| parse_error("meminfo"))?;
+        kib.checked_mul(1024).ok_or_else(|| parse_error("meminfo"))
+    };
+    Ok(MemInfo {
+        total: field("MemTotal")?,
+        available: field("MemAvailable")?,
+        swap_total: field("SwapTotal")?,
+        swap_free: field("SwapFree")?,
+    })
+}
+
+/// First three fields of `/proc/loadavg`.
+fn parse_loadavg(text: &str) -> Result<[f64; 3]> {
+    let mut it = text.split_whitespace().map(str::parse::<f64>);
+    let mut next = || {
+        it.next()
+            .and_then(std::result::Result::ok)
+            .ok_or_else(|| parse_error("loadavg"))
+    };
+    Ok([next()?, next()?, next()?])
 }
 
 fn parse_error(what: &str) -> Error {
@@ -277,10 +408,56 @@ mod tests {
     }
 
     #[test]
+    fn stats_from_tree() {
+        let root = populated("stats");
+        root.write(
+            "proc/meminfo",
+            "MemTotal: 1000 kB\nMemFree: 100 kB\nMemAvailable: 400 kB\n\
+             SwapTotal: 200 kB\nSwapFree: 150 kB\n",
+        );
+        root.write("proc/loadavg", "0.50 1.25 2.00 1/123 4567\n");
+        root.write(
+            "proc/stat",
+            "cpu  100 0 100 700 100 0 0 0 0 0\ncpu0 1 2 3 4 5\n",
+        );
+        let probe = SystemProbe::new(&root.0);
+        let s = probe.stats().unwrap();
+        assert_eq!(s.cpu_percent, 20.0, "since boot: 200 busy of 1000");
+        assert_eq!(s.memory_total_bytes, 1000 * 1024);
+        assert_eq!(s.memory_used_bytes, 600 * 1024);
+        assert_eq!(
+            (s.swap_total_bytes, s.swap_used_bytes),
+            (200 * 1024, 50 * 1024)
+        );
+        assert_eq!(s.load, [0.5, 1.25, 2.0]);
+        assert_eq!(s.uptime_s, 12345);
+
+        // Next call measures only the delta: +300 busy, +100 idle.
+        root.write("proc/stat", "cpu  250 0 250 800 100 0 0 0 0 0\n");
+        assert_eq!(probe.stats().unwrap().cpu_percent, 75.0);
+    }
+
+    #[test]
+    fn stats_parsers_reject_garbage() {
+        assert!(parse_cpu_times("cpu0 1 2 3 4 5").is_err());
+        assert!(parse_cpu_times("cpu  1 2").is_err());
+        assert!(parse_cpu_times("cpu  1 x 3 4 5").is_err());
+        assert!(parse_loadavg("1.0 2.0").is_err());
+        assert!(parse_meminfo("MemTotal: 1 kB").is_err());
+        assert_eq!(
+            CpuTimes { total: 5, idle: 5 }.busy_percent_since(CpuTimes { total: 5, idle: 5 }),
+            0.0
+        );
+    }
+
+    #[test]
     fn real_host_smoke() {
         // Linux CI and dev hosts always have these procfs files.
         let info = SystemProbe::default().host_info().unwrap();
         assert!(info.cpu_count >= 1);
         assert!(info.memory_total_bytes > 0);
+        let stats = SystemProbe::default().stats().unwrap();
+        assert!((0.0..=100.0).contains(&stats.cpu_percent));
+        assert!(stats.memory_used_bytes <= stats.memory_total_bytes);
     }
 }

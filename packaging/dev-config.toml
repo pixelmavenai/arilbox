@@ -18,6 +18,7 @@ lxc_path = "/var/lib/lxc"
 [paths]
 data_dir = "target/dev/data"
 catalog_dir = "catalog"
+web_dir = "web/dist"                   # npm run build in web/
 
 [network]
 bridge = "arilbox0"

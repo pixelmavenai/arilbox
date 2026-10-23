@@ -2,13 +2,14 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::net::Ipv4Addr;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use arilbox_core::{ContainerName, SnapshotName};
 use time::OffsetDateTime;
 
 use crate::backend::ContainerBackend;
+use crate::console::{Console, ConsoleInput, TermSize};
 use crate::error::{Error, Result};
 use crate::types::{ContainerInfo, ContainerState, CreateSpec, ExecOutput, Limits, SnapshotInfo};
 
@@ -32,6 +33,7 @@ struct State {
 pub struct MockBackend {
     state: Mutex<State>,
     failures: Mutex<HashSet<&'static str>>,
+    console_sizes: Arc<Mutex<Vec<TermSize>>>,
 }
 
 impl MockBackend {
@@ -43,6 +45,14 @@ impl MockBackend {
     /// Current limits of a container (the trait has no getter; handy in tests).
     pub fn limits(&self, name: &ContainerName) -> Result<Limits> {
         Ok(self.lock().get(name)?.limits)
+    }
+
+    /// Every terminal size a mock console was opened with or resized to, in order.
+    pub fn console_sizes(&self) -> Vec<TermSize> {
+        self.console_sizes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// Makes every later call of operation `op` (`"create"`, `"start"`, `"stop"`, `"kill"`,
@@ -271,6 +281,86 @@ impl ContainerBackend for MockBackend {
             stderr: Vec::new(),
         })
     }
+
+    /// A loopback terminal: prints a banner, then echoes input (`\r` as `\r\n`). Shutting
+    /// down the input ends the output.
+    async fn console(&self, name: &ContainerName, size: TermSize) -> Result<Console> {
+        self.check("console")?;
+        self.lock().require_state(name, ContainerState::Running)?;
+        let (user, backend) = tokio::io::duplex(4096);
+        let (output, writer) = tokio::io::split(user);
+        let mut input = MockConsoleInput {
+            writer,
+            sizes: self.console_sizes.clone(),
+        };
+        input.resize(size)?;
+        tokio::spawn(echo(backend, format!("mock console: {name}\r\n# ")));
+        Ok(Console {
+            output: Box::new(output),
+            input: Box::new(input),
+            session: Box::new(()),
+        })
+    }
+}
+
+async fn echo(mut stream: tokio::io::DuplexStream, banner: String) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    if stream.write_all(banner.as_bytes()).await.is_err() {
+        return;
+    }
+    let mut buf = [0u8; 1024];
+    while let Ok(n @ 1..) = stream.read(&mut buf).await {
+        let mut out = Vec::with_capacity(n);
+        for &b in &buf[..n] {
+            if b == b'\r' {
+                out.extend_from_slice(b"\r\n");
+            } else {
+                out.push(b);
+            }
+        }
+        if stream.write_all(&out).await.is_err() {
+            return;
+        }
+    }
+}
+
+struct MockConsoleInput {
+    writer: tokio::io::WriteHalf<tokio::io::DuplexStream>,
+    sizes: Arc<Mutex<Vec<TermSize>>>,
+}
+
+impl ConsoleInput for MockConsoleInput {
+    fn resize(&mut self, size: TermSize) -> Result<()> {
+        self.sizes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(size);
+        Ok(())
+    }
+}
+
+impl tokio::io::AsyncWrite for MockConsoleInput {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.writer).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.writer).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.writer).poll_shutdown(cx)
+    }
 }
 
 #[cfg(test)]
@@ -456,5 +546,40 @@ mod tests {
         assert_eq!(json["state"], "stopped");
         // RFC 3339 UTC
         assert!(json["created_at"].as_str().unwrap().ends_with('Z'));
+    }
+
+    #[tokio::test]
+    async fn console_echoes_and_records_sizes() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let b = MockBackend::new();
+        b.create(&spec("web")).await.unwrap();
+        let size = TermSize { rows: 24, cols: 80 };
+        assert!(matches!(
+            b.console(&name("web"), size).await,
+            Err(Error::WrongState { .. })
+        ));
+        b.start(&name("web")).await.unwrap();
+        let mut c = b.console(&name("web"), size).await.unwrap();
+        c.input.write_all(b"ls\r").await.unwrap();
+        c.input
+            .resize(TermSize {
+                rows: 50,
+                cols: 120,
+            })
+            .unwrap();
+        c.input.shutdown().await.unwrap();
+        let mut out = String::new();
+        c.output.read_to_string(&mut out).await.unwrap();
+        assert_eq!(out, "mock console: web\r\n# ls\r\n");
+        assert_eq!(
+            b.console_sizes(),
+            [
+                size,
+                TermSize {
+                    rows: 50,
+                    cols: 120
+                }
+            ]
+        );
     }
 }

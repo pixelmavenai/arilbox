@@ -13,13 +13,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arilbox_core::config::{StoragePool, TemplateRef};
-use arilbox_core::exec::{CommandSpec, Exec, ExecError, Program};
+use arilbox_core::exec::{CommandSpec, Exec, ExecError, Program, TermSize};
 use arilbox_core::{BridgeName, ContainerName, DatasetPath, SnapshotName, StorageName};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crate::backend::ContainerBackend;
 use crate::config::{ContainerConfig, MacAddr, Rootfs, render_config, seed_config};
+use crate::console::{Console, PtyInput};
 use crate::error::{Error, Result};
 use crate::fsutil::write_atomic;
 use crate::template::{Image, host_arch, image_for};
@@ -293,6 +294,26 @@ pub fn attach_cmd(lxc_path: &Path, name: &ContainerName, cmd: &[String]) -> Comm
     CommandSpec::new(Program::LxcAttach, args).timeout(Duration::from_secs(120))
 }
 
+/// `PATH` inside a console shell.
+const CONSOLE_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
+/// `lxc-attach` for an interactive shell: root's login shell from the container's
+/// `/etc/passwd`, with a clean environment. Run on a terminal, `lxc-attach` allocates a pty
+/// inside the container and forwards window-size changes.
+pub fn console_cmd(lxc_path: &Path, name: &ContainerName) -> CommandSpec {
+    let mut args = base_args(lxc_path, name);
+    args.push("--clear-env".into());
+    for var in [
+        "TERM=xterm-256color".to_owned(),
+        "HOME=/root".to_owned(),
+        "LANG=C.UTF-8".to_owned(),
+        format!("PATH={CONSOLE_PATH}"),
+    ] {
+        args.extend(["--set-var".into(), var.into()]);
+    }
+    CommandSpec::new(Program::LxcAttach, args)
+}
+
 // ---- lxc-info parsing -----------------------------------------------------------------------
 
 /// Runtime fields parsed from `lxc-info -H`.
@@ -563,6 +584,26 @@ impl ContainerBackend for LxcCli {
             }),
             Err(e) => Err(exec_error(e)),
         }
+    }
+
+    async fn console(&self, name: &ContainerName, size: TermSize) -> Result<Console> {
+        let info = self.info(name).await?;
+        if info.state != ContainerState::Running {
+            return Err(Error::WrongState {
+                name: name.clone(),
+                state: info.state,
+            });
+        }
+        let pty = self
+            .exec
+            .spawn_pty(&console_cmd(&self.lxc_path, name), size)
+            .map_err(exec_error)?;
+        let (output, input) = pty.pty.into_split();
+        Ok(Console {
+            output: Box::new(output),
+            input: Box::new(PtyInput(input)),
+            session: Box::new(pty.child),
+        })
     }
 }
 
@@ -960,5 +1001,44 @@ mod tests {
         f.exec.push_response(Ok(Fixture::info_output("STOPPED")));
         f.backend.start(&name("web")).await.unwrap();
         assert_eq!(f.exec.calls().last().unwrap().program, Program::LxcStart);
+
+        // Console: refused when stopped, spawned on a pty when running.
+        let size = TermSize { rows: 24, cols: 80 };
+        f.exec.push_response(Ok(Fixture::info_output("STOPPED")));
+        assert!(matches!(
+            f.backend.console(&name("web"), size).await,
+            Err(Error::WrongState { .. })
+        ));
+        assert_eq!(f.exec.calls().last().unwrap().program, Program::LxcInfo);
+        f.exec.push_response(Ok(Fixture::info_output("RUNNING")));
+        // RecordingExec refuses ptys, after recording the spec.
+        assert!(f.backend.console(&name("web"), size).await.is_err());
+        let last = f.exec.calls().last().unwrap().clone();
+        assert_eq!(last, console_cmd(&f.root.join("lxc"), &name("web")));
+    }
+
+    #[test]
+    fn console_command_has_clean_environment() {
+        let spec = console_cmd(Path::new("/var/lib/lxc"), &name("web"));
+        assert_eq!(spec.program, Program::LxcAttach);
+        let args: Vec<&str> = spec.args.iter().map(|a| a.to_str().unwrap()).collect();
+        assert_eq!(
+            args,
+            [
+                "-P",
+                "/var/lib/lxc",
+                "-n",
+                "web",
+                "--clear-env",
+                "--set-var",
+                "TERM=xterm-256color",
+                "--set-var",
+                "HOME=/root",
+                "--set-var",
+                "LANG=C.UTF-8",
+                "--set-var",
+                "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            ]
+        );
     }
 }

@@ -60,3 +60,24 @@ pub fn query<T: DeserializeOwned>(uri: &axum::http::Uri) -> Result<T, ApiError> 
         .map(|q| q.0)
         .map_err(|e| invalid(format!("Invalid query string: {}", e.body_text())))
 }
+
+/// The client's IP address, from the `ConnectInfo` the server attaches to each request.
+/// Unspecified (`0.0.0.0`) when absent, as in handler tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientIp(pub std::net::IpAddr);
+
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for ClientIp {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        Ok(ClientIp(
+            parts
+                .extensions
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .map_or(std::net::Ipv4Addr::UNSPECIFIED.into(), |c| c.0.ip()),
+        ))
+    }
+}

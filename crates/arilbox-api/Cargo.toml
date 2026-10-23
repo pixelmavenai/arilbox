@@ -12,12 +12,14 @@ publish.workspace = true
 lxc-integration = []
 
 [dependencies]
+argon2.workspace = true
 arilbox-core.workspace = true
 arilbox-net.workspace = true
 arilxc.workspace = true
 async-trait.workspace = true
 axum.workspace = true
-futures-util.workspace = true
+futures-util = { workspace = true, features = ["sink"] }
+ring.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
@@ -28,6 +30,8 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+# WebSocket client for the console tests; already in the tree through axum's `ws` feature.
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
 tower.workspace = true
 
 [lints]

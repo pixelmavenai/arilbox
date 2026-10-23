@@ -75,6 +75,8 @@ pub struct PathsConfig {
     pub data_dir: PathBuf,
     /// Built-in app catalog.
     pub catalog_dir: PathBuf,
+    /// Built web UI (`web/dist`), served at `/`.
+    pub web_dir: PathBuf,
 }
 
 impl Default for PathsConfig {
@@ -82,6 +84,7 @@ impl Default for PathsConfig {
         Self {
             data_dir: PathBuf::from("/var/lib/arilbox"),
             catalog_dir: PathBuf::from("/usr/share/arilbox/catalog"),
+            web_dir: PathBuf::from("/usr/share/arilbox/web"),
         }
     }
 }
@@ -339,6 +342,7 @@ mod tests {
         assert!(c.server.tls);
         assert!(!c.server.dev_mode);
         assert_eq!(c.paths.data_dir, PathBuf::from("/var/lib/arilbox"));
+        assert_eq!(c.paths.web_dir, PathBuf::from("/usr/share/arilbox/web"));
         assert_eq!(c.network.subnet.to_string(), "10.88.0.1/24");
         assert_eq!(c.defaults.template, TemplateRef::default());
     }
@@ -355,6 +359,7 @@ mod tests {
             [paths]
             data_dir = "/var/lib/arilbox"
             catalog_dir = "/usr/share/arilbox/catalog"
+            web_dir = "/usr/share/arilbox/web"
 
             [network]
             bridge = "arilbox0"
