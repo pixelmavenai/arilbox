@@ -238,6 +238,15 @@ Base path: `/api/v1`. JSON in and out. Auth via session cookie (§12). Errors us
 | 409 | Conflict (name exists, wrong state) |
 | 500 | Internal error (logged with request ID) |
 
+Every response carries an `X-Request-Id` header (the client's value if it sent one, otherwise a
+generated UUID). The same ID appears in the daemon's log lines for that request.
+
+### 7.0 Health
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/health` | Liveness check, `{ "status": "ok" }`. Never requires a session. |
+
 ### 7.1 Auth
 
 | Method | Path | Description |
@@ -251,10 +260,28 @@ Base path: `/api/v1`. JSON in and out. Auth via session cookie (§12). Errors us
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/host` | Hostname, OS, kernel, uptime, CPU/RAM totals, platform version |
+| GET | `/host` | Hostname, OS, kernel, uptime, CPU/RAM totals, platform version (see below) |
 | GET | `/host/stats` | Current CPU %, memory, load, per-pool usage |
 | GET | `/host/gpus` | Detected GPUs (via `nvidia-smi --query-gpu ... --format=csv`), memory, utilization |
 | GET | `/host/capabilities` | `{ "zfs": bool, "nvidia": bool, "kvm": bool, "cgroup_v2": bool }` |
+
+`GET /host` response:
+
+```json
+{
+  "hostname": "pve1",
+  "os": "Debian GNU/Linux 13 (trixie)",
+  "kernel": "6.12.48+deb13-amd64",
+  "uptime_s": 86400,
+  "cpu_count": 16,
+  "memory_total_bytes": 68719476736,
+  "platform_version": "0.1.0"
+}
+```
+
+Capability detection: `zfs` = `/dev/zfs` exists; `nvidia` = `nvidia-smi` installed and
+`/dev/nvidia0` exists; `kvm` = `/dev/kvm` exists; `cgroup_v2` =
+`/sys/fs/cgroup/cgroup.controllers` exists.
 
 ### 7.3 Containers
 
@@ -523,6 +550,8 @@ on failure **restore snapshot automatically** and mark job failed with reason.
 bind = "0.0.0.0:8443"
 tls_cert = "/etc/arilbox/tls/cert.pem"
 tls_key = "/etc/arilbox/tls/key.pem"
+tls = true                             # false only allowed with dev_mode = true
+dev_mode = false                       # human-readable logs; permits plain HTTP
 
 [paths]
 data_dir = "/var/lib/arilbox"          # SQLite DB, job logs
@@ -541,6 +570,12 @@ dataset = "rpool/arilbox"
 storage = "local-zfs"
 template = { distro = "debian", release = "13" }
 ```
+
+- Every key is optional; the values above are the defaults (`defaults.storage` has no default and,
+  when set, must name a configured pool).
+- Unknown keys are rejected so typos fail at start-up.
+- The self-signed certificate is generated only when **both** `tls_cert` and `tls_key` are missing;
+  if just one exists, start-up fails rather than overwriting it.
 
 ---
 

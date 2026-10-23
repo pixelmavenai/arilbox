@@ -44,7 +44,8 @@ arilbox/
 
 ## Current status
 
-- **Milestone:** M1 — Skeleton (see `SPEC.md` §19 for scope and acceptance criteria).
+- **Milestone:** M2 — Containers (M1 — Skeleton is done; see `SPEC.md` §19 for scope and
+  acceptance criteria).
 - Work milestone by milestone. Do not start features from a later milestone unless asked.
 - When a milestone's acceptance criteria pass, update this line.
 

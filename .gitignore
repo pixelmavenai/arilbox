@@ -1,0 +1,9 @@
+/target/
+/web/dist/
+/web/node_modules/
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+# Local, machine-specific configs (packaging/dev-config.toml is the shared one)
+*.local.toml
